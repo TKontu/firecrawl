@@ -136,7 +136,7 @@ import { initializeEngineForcing } from "../../scraper/WebScraper/utils/engine-f
 
     const jobDurationMs = Date.now() - jobStartTime;
     const jobDurationSeconds = Math.round(jobDurationMs / 1000);
-    logger.info("Job processing completed", {
+    logger.info("Job processing completed (processJobInternal returned)", {
       success: processResult.ok,
       durationMs: jobDurationMs,
       durationSeconds: jobDurationSeconds,
@@ -144,32 +144,53 @@ import { initializeEngineForcing } from "../../scraper/WebScraper/utils/engine-f
     });
 
     if (processResult.ok) {
-      if (
-        !(await scrapeQueue.jobFinish(
-          job.id,
-          job.lock!,
-          processResult.data,
-          logger,
-        ))
-      ) {
+      logger.debug("Starting jobFinish call", {
+        elapsedSinceJobStart: Date.now() - jobStartTime,
+      });
+      const jobFinishStart = Date.now();
+      const jobFinishResult = await scrapeQueue.jobFinish(
+        job.id,
+        job.lock!,
+        processResult.data,
+        logger,
+      );
+      logger.info("jobFinish completed", {
+        success: jobFinishResult,
+        durationMs: Date.now() - jobFinishStart,
+        totalElapsedMs: Date.now() - jobStartTime,
+      });
+      if (!jobFinishResult) {
         logger.warn("Could not update job status");
       }
     } else {
-      if (
-        !(await scrapeQueue.jobFail(
-          job.id,
-          job.lock!,
-          processResult.error instanceof Error
-            ? processResult.error.message
-            : typeof processResult.error === "string"
-              ? processResult.error
-              : JSON.stringify(processResult.error),
-          logger,
-        ))
-      ) {
+      logger.debug("Starting jobFail call", {
+        elapsedSinceJobStart: Date.now() - jobStartTime,
+      });
+      const jobFailStart = Date.now();
+      const jobFailResult = await scrapeQueue.jobFail(
+        job.id,
+        job.lock!,
+        processResult.error instanceof Error
+          ? processResult.error.message
+          : typeof processResult.error === "string"
+            ? processResult.error
+            : JSON.stringify(processResult.error),
+        logger,
+      );
+      logger.info("jobFail completed", {
+        success: jobFailResult,
+        durationMs: Date.now() - jobFailStart,
+        totalElapsedMs: Date.now() - jobStartTime,
+      });
+      if (!jobFailResult) {
         logger.warn("Could not update job status");
       }
     }
+
+    logger.info("Job fully completed", {
+      totalElapsedMs: Date.now() - jobStartTime,
+      totalElapsedSeconds: Math.round((Date.now() - jobStartTime) / 1000),
+    });
   }
 
   _logger.info("NuQ worker shutting down");

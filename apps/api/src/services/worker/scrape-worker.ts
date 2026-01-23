@@ -1160,6 +1160,12 @@ export const processJobInternal = async (job: NuQJob<ScrapeJobData>) => {
 };
 
 async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
+  const tracingEntryTime = Date.now();
+  logger.debug("processJobWithTracing ENTRY", {
+    mode: job.data.mode,
+    skipNuq: job.data.skipNuq,
+  });
+
   try {
     try {
       let extendLockInterval: NodeJS.Timeout | null = null;
@@ -1177,37 +1183,63 @@ async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
         }, jobLockExtendInterval);
       }
 
+      let stepStart = Date.now();
       await addJobPriority(job.data.team_id, job.id);
+      logger.debug("addJobPriority completed", {
+        durationMs: Date.now() - stepStart,
+      });
+
       try {
         if (job.data.mode === "kickoff") {
+          stepStart = Date.now();
           const result = await processKickoffJob(
             job as NuQJob<ScrapeJobKickoff>,
           );
+          logger.debug("processKickoffJob completed", {
+            durationMs: Date.now() - stepStart,
+            success: result.success,
+          });
           if (result.success) {
             return null;
           } else {
             throw (result as any).error;
           }
         } else if (job.data.mode === "kickoff_sitemap") {
+          stepStart = Date.now();
           const result = await processKickoffSitemapJob(
             job as NuQJob<ScrapeJobKickoffSitemap>,
           );
+          logger.debug("processKickoffSitemapJob completed", {
+            durationMs: Date.now() - stepStart,
+            success: result.success,
+          });
           if (result.success) {
             return null;
           } else {
             throw (result as any).error;
           }
         } else {
+          stepStart = Date.now();
           const result = await processJob(job as NuQJob<ScrapeJobSingleUrls>);
+          const processJobDuration = Date.now() - stepStart;
+          logger.debug("processJob completed", {
+            durationMs: processJobDuration,
+            success: result.success,
+          });
+
           if (result.success) {
             try {
               if (job.data.team_id) {
+                stepStart = Date.now();
                 await redisEvictConnection.set(
                   "most-recent-success:" + job.data.team_id,
                   new Date().toISOString(),
                   "EX",
                   60 * 60 * 24,
                 );
+                logger.debug("Set most-recent-success in Redis", {
+                  durationMs: Date.now() - stepStart,
+                });
               }
             } catch (e) {
               logger.warn("Failed to set most recent success", { error: e });
@@ -1227,15 +1259,49 @@ async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
           }
         }
       } finally {
+        const cleanupStart = Date.now();
+        logger.debug("Starting job cleanup (inner finally)", {
+          elapsedSinceEntry: Date.now() - tracingEntryTime,
+        });
+
+        stepStart = Date.now();
         await deleteJobPriority(job.data.team_id, job.id);
+        logger.debug("deleteJobPriority completed", {
+          durationMs: Date.now() - stepStart,
+        });
+
         if (extendLockInterval) {
           clearInterval(extendLockInterval);
+          logger.debug("Cleared extendLockInterval");
         }
+
+        logger.debug("Inner finally cleanup completed", {
+          cleanupDurationMs: Date.now() - cleanupStart,
+        });
       }
     } finally {
+      const outerFinallyStart = Date.now();
+      logger.debug("Starting outer finally block", {
+        skipNuq: job.data.skipNuq,
+        elapsedSinceEntry: Date.now() - tracingEntryTime,
+      });
+
       if (!job.data.skipNuq) {
+        const concurrentJobDoneStart = Date.now();
+        logger.info("Starting concurrentJobDone", {
+          elapsedSinceEntry: Date.now() - tracingEntryTime,
+        });
         await concurrentJobDone(job);
+        logger.info("concurrentJobDone completed", {
+          durationMs: Date.now() - concurrentJobDoneStart,
+          elapsedSinceEntry: Date.now() - tracingEntryTime,
+        });
       }
+
+      logger.debug("Outer finally block completed", {
+        outerFinallyDurationMs: Date.now() - outerFinallyStart,
+        totalElapsedMs: Date.now() - tracingEntryTime,
+      });
     }
   } catch (error) {
     logger.warn("Job failed", { error });

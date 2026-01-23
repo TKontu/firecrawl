@@ -1332,26 +1332,52 @@ class NuQ<JobData = any, JobReturnValue = any> {
 
       const start = Date.now();
       try {
+        _logger.debug("jobFinish: Starting PostgreSQL update", {
+          scrapeId: id,
+        });
+        const queryStart = Date.now();
         const result = await nuqPool.query(
           `UPDATE ${this.queueName} SET status = 'completed'::nuq.job_status, lock = null, locked_at = null, finished_at = now(), returnvalue = $3 WHERE id = $1 AND lock = $2 RETURNING id, listen_channel_id;`,
           [id, lock, returnvalue],
         );
+        _logger.debug("jobFinish: PostgreSQL update completed", {
+          scrapeId: id,
+          durationMs: Date.now() - queryStart,
+          rowCount: result.rowCount,
+        });
 
         const success = result.rowCount !== 0;
 
         if (success) {
           const job = result.rows[0];
           if (this.nuqWaitMode === "listen" && !config.NUQ_RABBITMQ_URL) {
+            _logger.debug("jobFinish: Starting pg_notify", {
+              scrapeId: id,
+            });
+            const notifyStart = Date.now();
             await nuqPool.query(`SELECT pg_notify('${this.queueName}', $1);`, [
               job.id + "|completed",
             ]);
+            _logger.debug("jobFinish: pg_notify completed", {
+              scrapeId: id,
+              durationMs: Date.now() - notifyStart,
+            });
           } else if (config.NUQ_RABBITMQ_URL && job.listen_channel_id) {
+            _logger.debug("jobFinish: Starting sendJobEnd (RabbitMQ)", {
+              scrapeId: id,
+              listenChannelId: job.listen_channel_id,
+            });
+            const sendStart = Date.now();
             await this.sendJobEnd(
               job.id,
               "completed",
               job.listen_channel_id,
               _logger,
             );
+            _logger.debug("jobFinish: sendJobEnd completed", {
+              scrapeId: id,
+              durationMs: Date.now() - sendStart,
+            });
           }
         }
 
@@ -1390,26 +1416,52 @@ class NuQ<JobData = any, JobReturnValue = any> {
 
       const start = Date.now();
       try {
+        _logger.debug("jobFail: Starting PostgreSQL update", {
+          scrapeId: id,
+        });
+        const queryStart = Date.now();
         const result = await nuqPool.query(
           `UPDATE ${this.queueName} SET status = 'failed'::nuq.job_status, lock = null, locked_at = null, finished_at = now(), failedreason = $3 WHERE id = $1 AND lock = $2 RETURNING id, listen_channel_id;`,
           [id, lock, failedReason],
         );
+        _logger.debug("jobFail: PostgreSQL update completed", {
+          scrapeId: id,
+          durationMs: Date.now() - queryStart,
+          rowCount: result.rowCount,
+        });
 
         const success = result.rowCount !== 0;
 
         if (success) {
           const job = result.rows[0];
           if (this.nuqWaitMode === "listen" && !config.NUQ_RABBITMQ_URL) {
+            _logger.debug("jobFail: Starting pg_notify", {
+              scrapeId: id,
+            });
+            const notifyStart = Date.now();
             await nuqPool.query(`SELECT pg_notify('${this.queueName}', $1);`, [
               job.id + "|failed",
             ]);
+            _logger.debug("jobFail: pg_notify completed", {
+              scrapeId: id,
+              durationMs: Date.now() - notifyStart,
+            });
           } else if (config.NUQ_RABBITMQ_URL && job.listen_channel_id) {
+            _logger.debug("jobFail: Starting sendJobEnd (RabbitMQ)", {
+              scrapeId: id,
+              listenChannelId: job.listen_channel_id,
+            });
+            const sendStart = Date.now();
             await this.sendJobEnd(
               job.id,
               "failed",
               job.listen_channel_id,
               _logger,
             );
+            _logger.debug("jobFail: sendJobEnd completed", {
+              scrapeId: id,
+              durationMs: Date.now() - sendStart,
+            });
           }
         }
 

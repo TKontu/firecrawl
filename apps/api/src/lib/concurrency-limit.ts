@@ -295,17 +295,54 @@ async function getNextConcurrentJob(
  * @param job The BullMQ job that is done.
  */
 export async function concurrentJobDone(job: NuQJob<any>) {
+  const entryTime = Date.now();
+  const jobLogger = logger.child({
+    module: "concurrency-limit",
+    method: "concurrentJobDone",
+    scrapeId: job.id,
+    crawlId: job.data?.crawl_id,
+    teamId: job.data?.team_id,
+  });
+
+  jobLogger.debug("concurrentJobDone ENTRY", {
+    hasJobId: !!job.id,
+    hasTeamId: !!job.data?.team_id,
+    hasCrawlId: !!job.data?.crawl_id,
+  });
+
   if (job.id && job.data && job.data.team_id) {
+    let stepStart = Date.now();
     await removeConcurrencyLimitActiveJob(job.data.team_id, job.id);
+    jobLogger.debug("removeConcurrencyLimitActiveJob completed", {
+      durationMs: Date.now() - stepStart,
+    });
+
+    stepStart = Date.now();
     await cleanOldConcurrencyLimitEntries(job.data.team_id);
+    jobLogger.debug("cleanOldConcurrencyLimitEntries completed", {
+      durationMs: Date.now() - stepStart,
+    });
 
     if (job.data.crawl_id) {
+      stepStart = Date.now();
       await removeCrawlConcurrencyLimitActiveJob(job.data.crawl_id, job.id);
+      jobLogger.debug("removeCrawlConcurrencyLimitActiveJob completed", {
+        durationMs: Date.now() - stepStart,
+      });
+
+      stepStart = Date.now();
       await cleanOldCrawlConcurrencyLimitEntries(job.data.crawl_id);
+      jobLogger.debug("cleanOldCrawlConcurrencyLimitEntries completed", {
+        durationMs: Date.now() - stepStart,
+      });
     }
 
     let i = 0;
     for (; i < 10; i++) {
+      const loopStart = Date.now();
+      jobLogger.debug("Promotion loop iteration start", { iteration: i });
+
+      stepStart = Date.now();
       const maxTeamConcurrency =
         (
           await getACUCTeam(
@@ -317,36 +354,85 @@ export async function concurrentJobDone(job: NuQJob<any>) {
               : RateLimiterMode.Crawl,
           )
         )?.concurrency ?? 2;
+      jobLogger.debug("getACUCTeam completed", {
+        durationMs: Date.now() - stepStart,
+        maxTeamConcurrency,
+        iteration: i,
+      });
+
+      stepStart = Date.now();
       const currentActiveConcurrency = (
         await getConcurrencyLimitActiveJobs(job.data.team_id)
       ).length;
+      jobLogger.debug("getConcurrencyLimitActiveJobs completed", {
+        durationMs: Date.now() - stepStart,
+        currentActiveConcurrency,
+        iteration: i,
+      });
 
       if (currentActiveConcurrency < maxTeamConcurrency) {
+        stepStart = Date.now();
         const nextJob = await getNextConcurrentJob(job.data.team_id);
+        jobLogger.debug("getNextConcurrentJob completed", {
+          durationMs: Date.now() - stepStart,
+          foundJob: nextJob !== null,
+          nextJobId: nextJob?.job?.id,
+          iteration: i,
+        });
+
         if (nextJob !== null) {
+          stepStart = Date.now();
           await pushConcurrencyLimitActiveJob(
             job.data.team_id,
             nextJob.job.id,
             60 * 1000,
           );
+          jobLogger.debug("pushConcurrencyLimitActiveJob completed", {
+            durationMs: Date.now() - stepStart,
+            iteration: i,
+          });
 
           if (nextJob.job.data.crawl_id) {
+            stepStart = Date.now();
             await pushCrawlConcurrencyLimitActiveJob(
               nextJob.job.data.crawl_id,
               nextJob.job.id,
               60 * 1000,
             );
+            jobLogger.debug("pushCrawlConcurrencyLimitActiveJob completed", {
+              durationMs: Date.now() - stepStart,
+              iteration: i,
+            });
 
+            stepStart = Date.now();
             const sc = await getCrawl(nextJob.job.data.crawl_id);
+            jobLogger.debug("getCrawl for delay check completed", {
+              durationMs: Date.now() - stepStart,
+              hasDelay: sc !== null && typeof sc.crawlerOptions?.delay === "number",
+              delayValue: sc?.crawlerOptions?.delay,
+              iteration: i,
+            });
+
             if (sc !== null && typeof sc.crawlerOptions?.delay === "number") {
+              const delayMs = sc.crawlerOptions.delay * 1000;
+              jobLogger.info("Starting crawler delay sleep", {
+                delayMs,
+                delaySeconds: sc.crawlerOptions.delay,
+                iteration: i,
+              });
               await new Promise(resolve =>
-                setTimeout(resolve, sc.crawlerOptions.delay * 1000),
+                setTimeout(resolve, delayMs),
               );
+              jobLogger.info("Crawler delay sleep completed", {
+                delayMs,
+                iteration: i,
+              });
             }
           }
 
           abTestJob(nextJob.job.data);
 
+          stepStart = Date.now();
           const promotedSuccessfully =
             (await scrapeQueue.promoteJobFromBacklogOrAdd(
               nextJob.job.id,
@@ -358,12 +444,21 @@ export async function concurrentJobDone(job: NuQJob<any>) {
                 groupId: nextJob.job.data.crawl_id ?? undefined,
               },
             )) !== null;
+          jobLogger.debug("promoteJobFromBacklogOrAdd completed", {
+            durationMs: Date.now() - stepStart,
+            promotedSuccessfully,
+            iteration: i,
+          });
 
           if (promotedSuccessfully) {
             logger.debug("Successfully promoted concurrent queued job", {
               teamId: job.data.team_id,
               jobId: nextJob.job.id,
               zeroDataRetention: nextJob.job.data?.zeroDataRetention,
+            });
+            jobLogger.debug("Promotion loop completed - job promoted", {
+              loopDurationMs: Date.now() - loopStart,
+              totalIterations: i + 1,
             });
             break;
           } else {
@@ -377,9 +472,19 @@ export async function concurrentJobDone(job: NuQJob<any>) {
             );
           }
         } else {
+          jobLogger.debug("Promotion loop completed - no next job", {
+            loopDurationMs: Date.now() - loopStart,
+            totalIterations: i + 1,
+          });
           break;
         }
       } else {
+        jobLogger.debug("Promotion loop completed - at concurrency limit", {
+          loopDurationMs: Date.now() - loopStart,
+          currentActiveConcurrency,
+          maxTeamConcurrency,
+          totalIterations: i + 1,
+        });
         break;
       }
     }
@@ -393,4 +498,10 @@ export async function concurrentJobDone(job: NuQJob<any>) {
       );
     }
   }
+
+  const totalDuration = Date.now() - entryTime;
+  jobLogger.info("concurrentJobDone EXIT", {
+    totalDurationMs: totalDuration,
+    totalDurationSeconds: Math.round(totalDuration / 1000),
+  });
 }
